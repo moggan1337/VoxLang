@@ -89,8 +89,8 @@ export class Lexer {
       this.skipWhitespace();
       if (this.pos >= this.source.length) break;
       
-      const line = this.line;
-      const column = this.column;
+      let line = this.line;
+      let column = this.column;
       const char = this.peek();
       
       // Newline
@@ -170,7 +170,7 @@ export class Lexer {
       throw new Error(`Unexpected character: ${char} at ${line}:${column}`);
     }
     
-    tokens.push({ type: TokenType.EOF, value: '', line, column });
+    tokens.push({ type: TokenType.EOF, value: '', line: this.line, column: this.column });
     return tokens;
   }
 }
@@ -236,6 +236,10 @@ export class Parser {
     if (token.type === TokenType.PRINT) {
       return this.parsePrintStatement();
     }
+    if (token.type === TokenType.SEMICOLON) {
+      this.advance();
+      return null;
+    }
     
     return this.parseExpressionStatement();
   }
@@ -245,6 +249,7 @@ export class Parser {
     const name = this.expect(TokenType.IDENTIFIER).value;
     this.expect(TokenType.ASSIGN);
     const value = this.parseExpression();
+    if (this.peek().type === TokenType.SEMICOLON) this.advance();
     return { type: 'LetStatement', name, value };
   }
   
@@ -325,22 +330,35 @@ export class Parser {
   private parseReturnStatement(): ASTNode {
     this.advance(); // return
     const value = this.parseExpression();
+    if (this.peek().type === TokenType.SEMICOLON) this.advance();
     return { type: 'ReturnStatement', value };
   }
   
   private parsePrintStatement(): ASTNode {
     this.advance(); // print
     const argument = this.parseExpression();
+    if (this.peek().type === TokenType.SEMICOLON) this.advance();
     return { type: 'PrintStatement', argument };
   }
   
   private parseExpressionStatement(): ASTNode {
     const expr = this.parseExpression();
+    if (this.peek().type === TokenType.SEMICOLON) this.advance();
     return { type: 'ExpressionStatement', expression: expr };
   }
   
   private parseExpression(): ASTNode {
-    return this.parseOr();
+    return this.parseAssignment();
+  }
+  
+  private parseAssignment(): ASTNode {
+    const left = this.parseOr();
+    if (this.peek().type === TokenType.ASSIGN) {
+      this.advance();
+      const right = this.parseAssignment();
+      return { type: 'AssignmentExpression', left, right };
+    }
+    return left;
   }
   
   private parseOr(): ASTNode {
@@ -422,6 +440,25 @@ export class Parser {
     return expr;
   }
   
+  private parseFnExpression(): ASTNode {
+    this.advance(); // fn
+    this.expect(TokenType.LPAREN);
+    const params: string[] = [];
+    while (this.peek().type !== TokenType.RPAREN) {
+      params.push(this.expect(TokenType.IDENTIFIER).value as string);
+      if (this.peek().type === TokenType.COMMA) this.advance();
+    }
+    this.expect(TokenType.RPAREN);
+    this.expect(TokenType.LBRACE);
+    const body: ASTNode[] = [];
+    while (this.peek().type !== TokenType.RBRACE) {
+      const stmt = this.parseStatement();
+      if (stmt) body.push(stmt);
+    }
+    this.expect(TokenType.RBRACE);
+    return { type: 'FunctionExpression', params, body };
+  }
+  
   private parsePrimary(): ASTNode {
     const token = this.peek();
     
@@ -449,6 +486,9 @@ export class Parser {
       this.advance();
       return { type: 'Identifier', name: token.value };
     }
+    if (token.type === TokenType.FN) {
+      return this.parseFnExpression();
+    }
     if (token.type === TokenType.LPAREN) {
       this.advance();
       const expr = this.parseExpression();
@@ -471,12 +511,14 @@ export class CodeGenerator {
         return `let ${node.name} = ${this.generate(node.value)};`;
       case 'FunctionDeclaration':
         return `function ${node.name}(${(node.params as string[]).join(', ')}) {\n${(node.body as ASTNode[]).map(s => '  ' + this.generate(s)).join('\n')}\n}`;
+      case 'FunctionExpression':
+        return `function (${(node.params as string[]).join(', ')}) {\n${(node.body as ASTNode[]).map(s => '  ' + this.generate(s)).join('\n')}\n}`;
       case 'IfStatement':
-        let result = `if (${this.generate(node.condition)}) {\n${(node.consequent as ASTNode[]).map(s => '  ' + this.generate(s)).join('\n')}\n}`;
+        let result = `if (${this.generate(node.condition)}) {\n${(node.consequent as ASTNode[]).map(s => '  ' + this.generate(s)).join('\n')}\n  }`;
         if (node.alternate) {
-          result += ` else {\n${(node.alternate as ASTNode[]).map(s => '  ' + this.generate(s)).join('\n')}\n}`;
+          result += ` else {\n${(node.alternate as ASTNode[]).map(s => '  ' + this.generate(s)).join('\n')}\n  }`;
         }
-        return result + '}';
+        return result;
       case 'WhileStatement':
         return `while (${this.generate(node.condition)}) {\n${(node.body as ASTNode[]).map(s => '  ' + this.generate(s)).join('\n')}\n}`;
       case 'ForStatement':
@@ -502,6 +544,8 @@ export class CodeGenerator {
         return 'null';
       case 'Identifier':
         return String(node.name);
+      case 'AssignmentExpression':
+        return `${this.generate(node.left)} = ${this.generate(node.right)}`;
       default:
         throw new Error(`Unknown node type: ${node.type}`);
     }
